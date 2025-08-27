@@ -1,0 +1,231 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'AWS Security Vulnerabilities Demo Environment for AWS CLI Q Dev'
+
+Parameters: {}
+
+Resources:
+  # VPC and Networking
+  DemoVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: VulnerableDemo-VPC
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref DemoVPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: VulnerableDemo-PublicSubnet
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: VulnerableDemo-IGW
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref DemoVPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref DemoVPC
+      Tags:
+        - Key: Name
+          Value: VulnerableDemo-PublicRT
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  SubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  # VULNERABILITY: Misconfigured Security Group (SSH from anywhere)
+  VulnerableSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'VULNERABLE: SSH access from anywhere'
+      VpcId: !Ref DemoVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+          Description: 'VULNERABLE: SSH from anywhere'
+      Tags:
+        - Key: Name
+          Value: VulnerableDemo-SG
+
+  # Simple EC2 Instance
+  VulnerableEC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: ami-047126e50991d067b  # Amazon Linux 2023 AMI for ap-southeast-1
+      InstanceType: t2.nano  # Cheapest instance type
+      SubnetId: !Ref PublicSubnet
+      SecurityGroupIds:
+        - !Ref VulnerableSecurityGroup
+      Tags:
+        - Key: Name
+          Value: VulnerableDemo-EC2
+
+  # VULNERABILITY: Overly-permissive IAM User
+  VulnerableIAMUser:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: VulnerableDemo-User
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess  # VULNERABLE: Full admin access
+      Tags:
+        - Key: Name
+          Value: VulnerableDemo-User
+
+  # IAM Role for Lambda
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  # VULNERABILITY: Lambda with hardcoded API key
+  VulnerableLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: VulnerableDemo-Function
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import requests
+          
+          def lambda_handler(event, context):
+              # VULNERABILITY: Hardcoded DeepSeek API key
+              DEEPSEEK_API_KEY = "sk-1234567890abcdef1234567890abcdef1234567890abcdef"
+              
+              # VULNERABILITY: Other hardcoded secrets
+              DATABASE_PASSWORD = "super_secret_password_123"
+              JWT_SECRET = "my-jwt-secret-key-dont-share"
+              
+              headers = {
+                  "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+                  "Content-Type": "application/json"
+              }
+              
+              # Sample API call (won't actually work with fake key)
+              try:
+                  response = requests.post(
+                      "https://api.deepseek.com/v1/chat/completions",
+                      headers=headers,
+                      json={
+                          "model": "deepseek-chat",
+                          "messages": [{"role": "user", "content": "Hello"}]
+                      }
+                  )
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps('API call successful')
+                  }
+              except Exception as e:
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps(f'Error: {str(e)}')
+                  }
+      Tags:
+        - Key: Name
+          Value: VulnerableDemo-Lambda
+
+
+
+  # VULNERABILITY: Misconfigured S3 Bucket
+  VulnerableS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'vulnerable-demo-bucket-${AWS::AccountId}-${AWS::Region}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false        # VULNERABLE: Allows public ACLs
+        BlockPublicPolicy: false      # VULNERABLE: Allows public bucket policies
+        IgnorePublicAcls: false       # VULNERABLE: Doesn't ignore public ACLs
+        RestrictPublicBuckets: false  # VULNERABLE: Doesn't restrict public buckets
+      VersioningConfiguration:
+        Status: Suspended             # VULNERABLE: Versioning disabled
+      Tags:
+        - Key: Name
+          Value: VulnerableDemo-S3Bucket
+
+  # VULNERABILITY: Public S3 Bucket Policy
+  VulnerableS3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref VulnerableS3Bucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: PublicReadGetObject
+            Effect: Allow
+            Principal: '*'              # VULNERABLE: Public access
+            Action: 's3:GetObject'
+            Resource: !Sub 'arn:aws:s3:::${VulnerableS3Bucket}/*'
+          - Sid: PublicListBucket
+            Effect: Allow
+            Principal: '*'              # VULNERABLE: Public listing
+            Action: 's3:ListBucket'
+            Resource: !Sub 'arn:aws:s3:::${VulnerableS3Bucket}'
+
+Outputs:
+  VPCId:
+    Description: 'VPC ID'
+    Value: !Ref DemoVPC
+
+  EC2InstanceId:
+    Description: 'EC2 Instance ID with vulnerabilities'
+    Value: !Ref VulnerableEC2Instance
+
+  PrivateIP:
+    Description: 'Private IP of the EC2 instance'
+    Value: !GetAtt VulnerableEC2Instance.PrivateIp
+
+  S3BucketName:
+    Description: 'S3 Bucket with misconfigurations'
+    Value: !Ref VulnerableS3Bucket
+
+  IAMUserName:
+    Description: 'IAM User with excessive permissions'
+    Value: !Ref VulnerableIAMUser
+
+  LambdaFunctionName:
+    Description: 'Lambda function with hardcoded API keys'
+    Value: !Ref VulnerableLambdaFunction
+
+  SecurityGroupId:
+    Description: 'Security Group with SSH open to 0.0.0.0/0'
+    Value: !Ref VulnerableSecurityGroup
